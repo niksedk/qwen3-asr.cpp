@@ -1,9 +1,10 @@
 name: Release Qwen3-ASR CLI
 
 # Builds the qwen3-asr-cli (+ its shared libs) for the platforms Subtitle Edit ships and
-# attaches them to the GitHub Release for the pushed tag. CPU-only builds (no Vulkan), matching
-# what Subtitle Edit currently downloads. Run via a tag push (e.g. `git tag v0.1.1 && git push --tags`)
-# or manually from the Actions tab (workflow_dispatch) for a dry run that just uploads artifacts.
+# attaches them to the GitHub Release for the pushed tag. CPU builds for every platform, plus
+# Vulkan (GPU) builds for win64 and linux-x64. Run via a tag push (e.g. `git tag v0.1.2 &&
+# git push --tags`) or manually from the Actions tab (workflow_dispatch) for a dry run that
+# just uploads artifacts.
 
 on:
     push:
@@ -23,18 +24,31 @@ jobs:
                     -   name: win64
                         runner: windows-latest
                         archive: qwen3-asr-cpp-win64.zip
+                        vulkan: 'OFF'
+                    -   name: win64-vulkan
+                        runner: windows-latest
+                        archive: qwen3-asr-cpp-win64-vulkan.zip
+                        vulkan: 'ON'
                     -   name: linux
                         runner: ubuntu-22.04
                         archive: qwen3-asr-cpp-linux.zip
+                        vulkan: 'OFF'
+                    -   name: linux-vulkan
+                        runner: ubuntu-22.04
+                        archive: qwen3-asr-cpp-linux-vulkan.zip
+                        vulkan: 'ON'
                     -   name: linux-arm64
                         runner: ubuntu-22.04-arm
                         archive: qwen3-asr-cpp-linux-arm64.zip
+                        vulkan: 'OFF'
                     -   name: mac
                         runner: macos-14
                         archive: qwen3-asr-cpp-mac.zip
+                        vulkan: 'OFF'
                     -   name: mac-x64
                         runner: macos-15-intel
                         archive: qwen3-asr-cpp-mac-x64.zip
+                        vulkan: 'OFF'
         runs-on: ${{ matrix.runner }}
         steps:
             -   uses: actions/checkout@v6
@@ -42,15 +56,51 @@ jobs:
                     submodules: true
                     fetch-depth: 1
 
+            # ---- Vulkan SDK (GPU builds only) ----
+            -   name: Install Vulkan SDK (Windows)
+                if: matrix.vulkan == 'ON' && runner.os == 'Windows'
+                uses: jakoch/install-vulkan-sdk-action@v1
+                with:
+                    vulkan_version: 1.4.304.1
+                    install_runtime: true
+
+            -   name: Install Vulkan tools (Linux)
+                if: matrix.vulkan == 'ON' && runner.os == 'Linux'
+                run: |
+                    sudo apt update
+                    sudo apt install -y vulkan-tools glslang-tools libvulkan1 mesa-vulkan-drivers
+
+            -   name: Build shaderc / glslc (Linux)
+                if: matrix.vulkan == 'ON' && runner.os == 'Linux'
+                run: |
+                    SOURCE_DIR=$PWD/shaderc
+                    BUILD_DIR=$PWD/shaderc_build
+                    git clone https://github.com/google/shaderc $SOURCE_DIR
+                    cd $SOURCE_DIR
+                    ./utils/git-sync-deps
+                    mkdir $BUILD_DIR && cd $BUILD_DIR
+                    cmake -GNinja -DCMAKE_BUILD_TYPE=Release $SOURCE_DIR
+                    ninja
+                    sudo mv glslc/glslc /usr/local/bin/
+
+            -   name: Prepare Vulkan SDK (Linux)
+                if: matrix.vulkan == 'ON' && runner.os == 'Linux'
+                uses: humbletim/setup-vulkan-sdk@v1.2.1
+                with:
+                    vulkan-query-version: 1.4.304.1
+                    vulkan-components: Vulkan-Headers, Vulkan-Loader
+                    vulkan-use-cache: true
+
             -   name: Build (Release)
                 shell: bash
                 run: |
-                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.vulkan }}
                     cmake --build build --config Release -j 4
                     python tests/flatten_bin_files.py build bin
 
-            # Stage only the runtime files: the CLI, the shared libs it loads, and the optional
-            # Korean alignment dictionary. Test executables and import/debug libs are excluded.
+            # Stage only the runtime files: the CLI, the shared libs it loads (incl. the ggml
+            # Vulkan backend for GPU builds), and the optional Korean alignment dictionary. Test
+            # executables and import/debug libs are excluded.
             -   name: Package (Windows)
                 if: runner.os == 'Windows'
                 shell: bash
