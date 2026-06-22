@@ -1,0 +1,87 @@
+name: Release Qwen3-ASR CLI
+
+# Builds the qwen3-asr-cli (+ its shared libs) for the platforms Subtitle Edit ships and
+# attaches them to the GitHub Release for the pushed tag. CPU-only builds (no Vulkan), matching
+# what Subtitle Edit currently downloads. Run via a tag push (e.g. `git tag v0.1.1 && git push --tags`)
+# or manually from the Actions tab (workflow_dispatch) for a dry run that just uploads artifacts.
+
+on:
+    push:
+        tags:
+            - 'v*'
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+jobs:
+    build:
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    -   name: win64
+                        runner: windows-latest
+                        archive: qwen3-asr-cpp-win64.zip
+                    -   name: linux
+                        runner: ubuntu-22.04
+                        archive: qwen3-asr-cpp-linux.zip
+                    -   name: linux-arm64
+                        runner: ubuntu-22.04-arm
+                        archive: qwen3-asr-cpp-linux-arm64.zip
+                    -   name: mac
+                        runner: macos-14
+                        archive: qwen3-asr-cpp-mac.zip
+                    -   name: mac-x64
+                        runner: macos-15-intel
+                        archive: qwen3-asr-cpp-mac-x64.zip
+        runs-on: ${{ matrix.runner }}
+        steps:
+            -   uses: actions/checkout@v6
+                with:
+                    submodules: true
+                    fetch-depth: 1
+
+            -   name: Build (Release)
+                shell: bash
+                run: |
+                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+                    cmake --build build --config Release -j 4
+                    python tests/flatten_bin_files.py build bin
+
+            # Stage only the runtime files: the CLI, the shared libs it loads, and the optional
+            # Korean alignment dictionary. Test executables and import/debug libs are excluded.
+            -   name: Package (Windows)
+                if: runner.os == 'Windows'
+                shell: bash
+                run: |
+                    mkdir -p pkg/assets
+                    cp bin/qwen3-asr-cli.exe pkg/
+                    cp bin/*.dll pkg/
+                    cp assets/korean_dict_jieba.dict pkg/assets/ || true
+                    cd pkg && 7z a -tzip "../${{ matrix.archive }}" . >/dev/null
+
+            -   name: Package (Unix)
+                if: runner.os != 'Windows'
+                shell: bash
+                run: |
+                    mkdir -p pkg/assets
+                    cp bin/qwen3-asr-cli pkg/
+                    chmod +x pkg/qwen3-asr-cli
+                    # Linux shared libs (.so / .so.N) and macOS dylibs.
+                    cp bin/*.so* pkg/ 2>/dev/null || true
+                    cp bin/*.dylib pkg/ 2>/dev/null || true
+                    cp assets/korean_dict_jieba.dict pkg/assets/ || true
+                    cd pkg && zip -r "../${{ matrix.archive }}" . >/dev/null
+
+            -   name: Upload build artifact
+                uses: actions/upload-artifact@v4
+                with:
+                    name: ${{ matrix.archive }}
+                    path: ${{ matrix.archive }}
+
+            -   name: Attach to release
+                if: startsWith(github.ref, 'refs/tags/')
+                uses: softprops/action-gh-release@v2
+                with:
+                    files: ${{ matrix.archive }}
