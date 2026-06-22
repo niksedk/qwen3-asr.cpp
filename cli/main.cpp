@@ -225,11 +225,15 @@ static std::string alignment_to_json(const qwen3_asr::alignment_result & result)
 
     for (size_t i = 0; i < result.words.size(); ++i) {
         const auto & w = result.words[i];
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "    {\"word\": \"%s\", \"start\": %.3f, \"end\": %.3f}",
-                 escape_json_string(w.word).c_str(), w.start, w.end);
-        json += buf;
+        // Build the word string with std::string so a long word is never truncated.
+        // (The previous snprintf into a fixed char buf[256] cut off words longer than
+        // ~242 bytes — e.g. a whole Chinese transcript aligned as a single "word" — which
+        // produced an unterminated, unparseable JSON string.)
+        char times[64];
+        snprintf(times, sizeof(times), "\", \"start\": %.3f, \"end\": %.3f}", w.start, w.end);
+        json += "    {\"word\": \"";
+        json += escape_json_string(w.word);
+        json += times;
         if (i + 1 < result.words.size()) {
             json += ",";
         }
