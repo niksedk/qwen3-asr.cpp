@@ -145,6 +145,28 @@ jobs:
                     cp bin/*.so* pkg/ 2>/dev/null || true
                     cp bin/*.dylib pkg/ 2>/dev/null || true
                     cp assets/korean_dict_jieba.dict pkg/assets/ || true
+
+                    # flatten_bin_files.py resolves the build-tree symlinks, so the package keeps
+                    # only the fully-versioned libs (e.g. libggml.0.15.3.dylib) while the CLI/libs
+                    # link against the SONAME (e.g. @rpath/libggml.0.dylib). Provide those SONAME
+                    # names as real copies so they resolve - using copies rather than symlinks so it
+                    # survives archivers/extractors that don't preserve symlinks.
+                    cd pkg
+                    shopt -s nullglob
+                    for real in *.dylib; do
+                        if [[ "$real" =~ ^(.+)\.([0-9]+)\.[0-9]+\.[0-9]+\.dylib$ ]]; then
+                            soname="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.dylib"
+                            [ -e "$soname" ] || cp "$real" "$soname"
+                        fi
+                    done
+                    for real in *.so.*; do
+                        if [[ "$real" =~ ^(.+\.so)\.([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+                            soname="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+                            [ -e "$soname" ] || cp "$real" "$soname"
+                        fi
+                    done
+                    cd ..
+
                     cd pkg && zip -r "../${{ matrix.archive }}" . >/dev/null
 
             -   name: Upload build artifact

@@ -9,6 +9,19 @@ set(BUILD_SHARED_LIBS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# Make the CLI and shared libs locate their siblings relative to their own file at run time,
+# instead of CMake baking the (machine-specific) build directory in as the rpath. Without this,
+# the packaged macOS/Linux binaries keep an absolute CMAKE_BINARY_DIR rpath and fail with
+# "Library not loaded: @rpath/lib... (no such file)" on any other machine. Must be set before the
+# targets (incl. ggml below) are created so they inherit it.
+if (APPLE)
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+    set(CMAKE_INSTALL_RPATH "@loader_path")
+elseif (UNIX)
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+endif ()
+
 option(QWEN3_ASR_TEST "Enable test mode" ON)
 option(GGML_AVX "ggml: enable AVX" ON)
 option(GGML_AVX2 "ggml: enable AVX2" ON)
@@ -58,10 +71,6 @@ if(WIN32)
             IMPORT_PREFIX ""
             IMPORT_SUFFIX ".lib"
     )
-
-    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
-    set(CMAKE_INSTALL_RPATH "${CMAKE_BINARY_DIR}")
-
 endif()
 
 if (APPLE)
