@@ -91,10 +91,30 @@ jobs:
                     vulkan-components: Vulkan-Headers, Vulkan-Loader
                     vulkan-use-cache: true
 
+            # ggml >= 0.15.x requires find_package(SPIRV-Headers CONFIG) for the Vulkan backend,
+            # which the SDK/components above do not provide a CMake config for. Install the
+            # header-only package (tag matching the Vulkan SDK version) and expose its prefix.
+            -   name: Install SPIRV-Headers (Windows)
+                if: matrix.vulkan == 'ON' && runner.os == 'Windows'
+                run: |
+                    git clone --depth 1 --branch vulkan-sdk-1.4.304.1 https://github.com/KhronosGroup/SPIRV-Headers.git "$env:RUNNER_TEMP\SPIRV-Headers"
+                    cmake -S "$env:RUNNER_TEMP\SPIRV-Headers" -B "$env:RUNNER_TEMP\SPIRV-Headers\build" -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP\spirv-install"
+                    cmake --build "$env:RUNNER_TEMP\SPIRV-Headers\build" --target install
+                    $p = ("$env:RUNNER_TEMP\spirv-install") -replace '\\','/'
+                    "SPIRV_HEADERS_PREFIX=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+            -   name: Install SPIRV-Headers (Linux)
+                if: matrix.vulkan == 'ON' && runner.os == 'Linux'
+                run: |
+                    git clone --depth 1 --branch vulkan-sdk-1.4.304.1 https://github.com/KhronosGroup/SPIRV-Headers.git "$RUNNER_TEMP/SPIRV-Headers"
+                    cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/spirv-install"
+                    cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
+                    echo "SPIRV_HEADERS_PREFIX=$RUNNER_TEMP/spirv-install" >> "$GITHUB_ENV"
+
             -   name: Build (Release)
                 shell: bash
                 run: |
-                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.vulkan }}
+                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.vulkan }} -DCMAKE_PREFIX_PATH="$SPIRV_HEADERS_PREFIX"
                     cmake --build build --config Release -j 4
                     python tests/flatten_bin_files.py build bin
 
