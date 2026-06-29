@@ -26,6 +26,18 @@ jobs:
                     vulkan_version: 1.4.304.1
                     install_runtime: true
 
+            -   name: Install SPIRV-Headers (ggml-vulkan build dependency)
+                # ggml >= 0.15.x requires find_package(SPIRV-Headers CONFIG) for the Vulkan
+                # backend, which the installed SDK does not provide a CMake config for. Install
+                # the header-only package from the tag matching the Vulkan SDK version.
+                if: matrix.ggml_vulkan == 'ON'
+                run: |
+                    git clone --depth 1 --branch vulkan-sdk-1.4.304.1 https://github.com/KhronosGroup/SPIRV-Headers.git "$env:RUNNER_TEMP\SPIRV-Headers"
+                    cmake -S "$env:RUNNER_TEMP\SPIRV-Headers" -B "$env:RUNNER_TEMP\SPIRV-Headers\build" -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP\spirv-install"
+                    cmake --build "$env:RUNNER_TEMP\SPIRV-Headers\build" --target install
+                    $p = ("$env:RUNNER_TEMP\spirv-install") -replace '\\','/'
+                    "SPIRV_HEADERS_PREFIX=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
             -   name: Download assets
                 run: |
                     Start-BitsTransfer -Source "https://huggingface.co/Jaffe2718/Qwen3-ASR-GGUF/resolve/main/qwen3-asr-0.6b-q8_0.gguf?download=true" -Destination "assets/qwen3-asr-0.6b-q8_0.gguf"
@@ -35,7 +47,7 @@ jobs:
 
             -   name: Compile
                 run: |
-                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.ggml_vulkan }}
+                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.ggml_vulkan }} -DCMAKE_PREFIX_PATH="$env:SPIRV_HEADERS_PREFIX"
                     cmake --build build --config Release -j 4
                     python tests/flatten_bin_files.py build bin
 
@@ -111,6 +123,19 @@ jobs:
                     vulkan-components: Vulkan-Headers, Vulkan-Loader
                     vulkan-use-cache: true
 
+            -   name: Install SPIRV-Headers (ggml-vulkan build dependency)
+                # ggml >= 0.15.x requires find_package(SPIRV-Headers CONFIG) for the Vulkan
+                # backend. ggml-vulkan does not link the SPIRV-Headers target, so it also needs
+                # <spirv/unified1/spirv.hpp> on the default include path (it is resolved via
+                # __has_include) — installing to /usr/local satisfies both find_package and the
+                # compiler's system include search. Pin to the tag matching the Vulkan SDK.
+                if: matrix.ggml_vulkan == 'ON'
+                run: |
+                    git clone --depth 1 --branch vulkan-sdk-1.4.304.1 https://github.com/KhronosGroup/SPIRV-Headers.git "$RUNNER_TEMP/SPIRV-Headers"
+                    cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX=/usr/local
+                    sudo cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
+                    echo "SPIRV_HEADERS_PREFIX=/usr/local" >> "$GITHUB_ENV"
+
             -   name: Download assets      # cpu/vulkan, for test
                 run: |
                     curl -L -o assets/qwen3-asr-0.6b-q8_0.gguf https://huggingface.co/Jaffe2718/Qwen3-ASR-GGUF/resolve/main/qwen3-asr-0.6b-q8_0.gguf?download=true
@@ -121,7 +146,7 @@ jobs:
             -   name: Compile
                 shell: bash
                 run: |
-                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.ggml_vulkan }}
+                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.ggml_vulkan }} -DCMAKE_PREFIX_PATH="$SPIRV_HEADERS_PREFIX"
                     cmake --build build --config Release -j 4
                     python tests/flatten_bin_files.py build bin
 
