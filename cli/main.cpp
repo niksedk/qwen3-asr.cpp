@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <string>
 #include <fstream>
 
@@ -220,20 +221,36 @@ static std::string escape_json_string(const std::string & s) {
     return result;
 }
 
+// Formats a timestamp for JSON. A failed alignment can leave a word's start/end as
+// NaN or +/-Inf; "%.3f" would then emit "nan"/"-nan(ind)"/"inf", which is NOT valid
+// JSON and makes strict parsers (e.g. System.Text.Json in Subtitle Edit) reject the
+// whole file. Coerce any non-finite value to 0.0 so the output always parses.
+static std::string json_time(float t) {
+    if (!std::isfinite(t)) {
+        t = 0.0f;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.3f", t);
+    return std::string(buf);
+}
+
 static std::string alignment_to_json(const qwen3_asr::alignment_result & result) {
     std::string json = "{\n  \"words\": [\n";
 
     for (size_t i = 0; i < result.words.size(); ++i) {
         const auto & w = result.words[i];
-        // Build the word string with std::string so a long word is never truncated.
-        // (The previous snprintf into a fixed char buf[256] cut off words longer than
-        // ~242 bytes — e.g. a whole Chinese transcript aligned as a single "word" — which
-        // produced an unterminated, unparseable JSON string.)
-        char times[64];
-        snprintf(times, sizeof(times), "\", \"start\": %.3f, \"end\": %.3f}", w.start, w.end);
+        // Build every field with std::string (never a fixed char buffer) so nothing is
+        // ever truncated — a long word (e.g. a whole Chinese transcript aligned as a
+        // single "word") or an unexpectedly large timestamp would otherwise cut the JSON
+        // short and leave it unparseable. The word text is escaped; the timestamps are
+        // coerced to finite numbers. Together this guarantees well-formed JSON.
         json += "    {\"word\": \"";
         json += escape_json_string(w.word);
-        json += times;
+        json += "\", \"start\": ";
+        json += json_time(w.start);
+        json += ", \"end\": ";
+        json += json_time(w.end);
+        json += "}";
         if (i + 1 < result.words.size()) {
             json += ",";
         }
