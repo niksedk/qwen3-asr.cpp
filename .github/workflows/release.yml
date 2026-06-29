@@ -104,12 +104,15 @@ jobs:
                     "SPIRV_HEADERS_PREFIX=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
             -   name: Install SPIRV-Headers (Linux)
+                # Install to /usr/local so both find_package(SPIRV-Headers CONFIG) and the
+                # <spirv/unified1/spirv.hpp> __has_include in ggml-vulkan.cpp resolve (the target
+                # is not linked, so the header must be on the default include path).
                 if: matrix.vulkan == 'ON' && runner.os == 'Linux'
                 run: |
                     git clone --depth 1 --branch vulkan-sdk-1.4.304.1 https://github.com/KhronosGroup/SPIRV-Headers.git "$RUNNER_TEMP/SPIRV-Headers"
-                    cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/spirv-install"
-                    cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
-                    echo "SPIRV_HEADERS_PREFIX=$RUNNER_TEMP/spirv-install" >> "$GITHUB_ENV"
+                    cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX=/usr/local
+                    sudo cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
+                    echo "SPIRV_HEADERS_PREFIX=/usr/local" >> "$GITHUB_ENV"
 
             -   name: Build (Release)
                 shell: bash

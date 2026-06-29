@@ -125,14 +125,16 @@ jobs:
 
             -   name: Install SPIRV-Headers (ggml-vulkan build dependency)
                 # ggml >= 0.15.x requires find_package(SPIRV-Headers CONFIG) for the Vulkan
-                # backend; the components fetched above do not include it. Install the
-                # header-only package from the tag matching the Vulkan SDK version.
+                # backend. ggml-vulkan does not link the SPIRV-Headers target, so it also needs
+                # <spirv/unified1/spirv.hpp> on the default include path (it is resolved via
+                # __has_include) — installing to /usr/local satisfies both find_package and the
+                # compiler's system include search. Pin to the tag matching the Vulkan SDK.
                 if: matrix.ggml_vulkan == 'ON'
                 run: |
                     git clone --depth 1 --branch vulkan-sdk-1.4.304.1 https://github.com/KhronosGroup/SPIRV-Headers.git "$RUNNER_TEMP/SPIRV-Headers"
-                    cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/spirv-install"
-                    cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
-                    echo "SPIRV_HEADERS_PREFIX=$RUNNER_TEMP/spirv-install" >> "$GITHUB_ENV"
+                    cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX=/usr/local
+                    sudo cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
+                    echo "SPIRV_HEADERS_PREFIX=/usr/local" >> "$GITHUB_ENV"
 
             -   name: Download assets      # cpu/vulkan, for test
                 run: |
