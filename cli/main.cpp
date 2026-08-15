@@ -292,8 +292,16 @@ static std::string json_time(float t) {
     if (!std::isfinite(t)) {
         t = 0.0f;
     }
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.3f", t);
+    // Format via integer math instead of "%.3f": snprintf honors LC_NUMERIC, and a
+    // locale with a comma decimal separator (e.g. French/German Windows) would emit
+    // "1,840", which is invalid JSON. Integer formatting is locale-independent.
+    long long ms = llround((double)t * 1000.0);
+    bool neg = ms < 0;
+    if (neg) {
+        ms = -ms;
+    }
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%s%lld.%03lld", neg ? "-" : "", ms / 1000, ms % 1000);
     return std::string(buf);
 }
 
@@ -711,6 +719,10 @@ static void ggml_log_callback_quiet(enum ggml_log_level level, const char * text
 
 static void configure_console_utf8() {
     std::setlocale(LC_ALL, ".UTF-8");
+    // On Windows ".UTF-8" adopts the user's regional settings, so LC_NUMERIC can end
+    // up with a comma decimal separator (fr/de/...), leaking into every printf("%f")
+    // and strtof and corrupting the JSON output. Pin numeric handling back to "C".
+    std::setlocale(LC_NUMERIC, "C");
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
