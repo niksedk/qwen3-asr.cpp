@@ -57,6 +57,8 @@ It performs speech recognition and forced alignment with word-level timestamps.
 - **Align**: `./build/qwen3-asr-cli -m models/qwen3-forced-aligner-0.6b-f16.gguf -f audio.wav --align --text "text" --lang korean`
 - **Combined**: `./build/qwen3-asr-cli -m models/qwen3-asr-0.6b-f16.gguf --aligner-model models/qwen3-forced-aligner-0.6b-f16.gguf -f audio.wav --transcribe-align`
 - **Server**: `./build/qwen3-asr-server -m models/qwen3-asr-0.6b-q8_0.gguf --host 127.0.0.1 --port 8080`
+- **Reference comparison**: `tests/generate_reference.py` (HF mel / encoder output / transcript) + `build/test_mel`, `build/test_encoder`. `test_mel` also checks that the runtime-generated Slaney filterbank equals the feature extractor's filters.
+- **Debug env vars** (CLI/library, zero cost when unset): `QWEN3_ASR_DEBUG_TOPK=5` prints the top logits of every decoding step; `QWEN3_ASR_DEBUG_LOGITS=<file>` dumps the prompt logits; `QWEN3_ASR_DEBUG_HIDDEN=<dir>` dumps mel, encoder output, embeddings and every decoder layer output (float32 raw) for the prompt pass, for layer-by-layer comparison with `output_hidden_states=True` in transformers.
 
 ### Conventions
 

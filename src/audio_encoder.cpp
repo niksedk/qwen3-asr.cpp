@@ -362,7 +362,15 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
         int chunk_len = chunk_lengths[chunk_idx];
         int chunk_out_len = chunk_output_lengths[chunk_idx];
         
-        ggml_cgraph * gf_conv = build_graph_conv(chunk_len);
+        // The reference implementation pads every chunk to the longest chunk
+        // (chunk_size when there is more than one) with zeros before the conv
+        // stack and keeps only the valid output frames. Without the zero
+        // padding the conv's border handling differs on the trailing partial
+        // chunk and its frames come out wrong; audio shorter than one chunk is
+        // a single unpadded chunk in the reference as well.
+        const int conv_len = (n_chunks > 1) ? chunk_size : chunk_len;
+        
+        ggml_cgraph * gf_conv = build_graph_conv(conv_len);
         
         if (!ggml_backend_sched_alloc_graph(state_.sched, gf_conv)) {
             error_msg_ = "Failed to allocate conv graph for chunk " + std::to_string(chunk_idx);
@@ -376,14 +384,14 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
             return false;
         }
         
-        std::vector<float> chunk_mel(n_mel * chunk_len);
+        std::vector<float> chunk_mel(n_mel * conv_len, 0.0f);
         for (int m = 0; m < n_mel; ++m) {
             for (int f = 0; f < chunk_len; ++f) {
-                chunk_mel[f + m * chunk_len] = mel_data[m * n_frames + chunk_start + f];
+                chunk_mel[f + m * conv_len] = mel_data[m * n_frames + chunk_start + f];
             }
         }
         
-        ggml_backend_tensor_set(mel_tensor, chunk_mel.data(), 0, n_mel * chunk_len * sizeof(float));
+        ggml_backend_tensor_set(mel_tensor, chunk_mel.data(), 0, n_mel * conv_len * sizeof(float));
         
         if (ggml_backend_sched_graph_compute(state_.sched, gf_conv) != GGML_STATUS_SUCCESS) {
             error_msg_ = "Failed to compute conv graph for chunk " + std::to_string(chunk_idx);
@@ -398,12 +406,16 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
             return false;
         }
         
-        int64_t out_ctx = embd_conv->ne[1];
+        int64_t out_ctx_padded = embd_conv->ne[1];
         int64_t out_state = embd_conv->ne[0];
         
-        if (out_ctx != chunk_out_len) {
-            GGML_LOG_WARN("%s: Expected %d output frames, got %lld", __func__, chunk_out_len, (long long)out_ctx);
+        if (out_ctx_padded < chunk_out_len) {
+            GGML_LOG_WARN("%s: Expected at least %d output frames, got %lld", __func__, chunk_out_len, (long long)out_ctx_padded);
         }
+        
+        // keep only the frames that belong to the real (unpadded) chunk; frames are
+        // contiguous rows of out_state floats, so the valid ones come first
+        const int64_t out_ctx = std::min<int64_t>(chunk_out_len, out_ctx_padded);
         
         std::vector<float> chunk_output(out_ctx * out_state);
         ggml_backend_tensor_get(embd_conv, chunk_output.data(), 0, out_ctx * out_state * sizeof(float));

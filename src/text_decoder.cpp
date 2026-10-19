@@ -426,6 +426,23 @@ void TextDecoder::clear_kv_cache() {
     state_.cache.n_used = 0;
 }
 
+// Debug aid: QWEN3_ASR_DEBUG_HIDDEN=<dir> dumps the embeddings and every layer's
+// output of a prompt forward pass (n_tokens x hidden, float32) into <dir>.
+static const char * debug_hidden_dir() {
+    static const char * dir = getenv("QWEN3_ASR_DEBUG_HIDDEN");
+    return dir;
+}
+static bool debug_hidden_enabled() { return debug_hidden_dir() != nullptr; }
+
+static void debug_dump_tensor(ggml_cgraph * gf, const char * name, const std::string & path) {
+    ggml_tensor * t = ggml_graph_get_tensor(gf, name);
+    if (!t) return;
+    std::vector<float> data(ggml_nbytes(t) / sizeof(float));
+    ggml_backend_tensor_get(t, data.data(), 0, ggml_nbytes(t));
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char *>(data.data()), ggml_nbytes(t));
+}
+
 struct ggml_cgraph * TextDecoder::build_graph(
     const int32_t * tokens, int32_t n_tokens, int32_t n_past,
     const float * audio_embd, int32_t n_audio, int32_t audio_start_pos) {
@@ -594,6 +611,10 @@ struct ggml_cgraph * TextDecoder::build_graph(
         ggml_format_name(cur, "ffn_out_%d", il);
         
         inpL = ggml_add(ctx0, cur, inpFF);
+        if (debug_hidden_enabled()) {
+            ggml_format_name(inpL, "debug_layer_%d", il);
+            ggml_set_output(inpL);
+        }
     }
     
     cur = inpL;
@@ -713,6 +734,14 @@ bool TextDecoder::forward_with_audio(
     output.resize(n_logit_rows * vocab_size);
     ggml_backend_tensor_get(logits, output.data(), 0, output.size() * sizeof(float));
     
+    if (debug_hidden_enabled() && n_tokens > 1) {  // prompt pass only
+        const std::string dir = debug_hidden_dir();
+        debug_dump_tensor(gf, "embd_with_audio", dir + "/embd.f32");
+        for (int il = 0; il < model_.config.n_decoder_layers; ++il) {
+            debug_dump_tensor(gf, ("debug_layer_" + std::to_string(il)).c_str(), dir + "/layer_" + std::to_string(il) + ".f32");
+        }
+        fprintf(stderr, "dumped hidden states (%d tokens) to %s\n", n_tokens, dir.c_str());
+    }
     state_.cache.n_used = n_past + n_tokens;
     
     ggml_backend_sched_reset(state_.sched);

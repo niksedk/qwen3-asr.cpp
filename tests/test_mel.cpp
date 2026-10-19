@@ -90,6 +90,30 @@ int main(int argc, char** argv) {
     }
     printf("  Loaded filters: n_mel=%d, n_fft=%d\n", filters.n_mel, filters.n_fft);
 
+    // Regression check: the filterbank generated at runtime (what the CLI and
+    // the library actually use) must match the reference filters from the
+    // feature extractor. The mel comparison below runs with the generated
+    // filters so the production code path is what gets tested.
+    {
+        MelFilters generated;
+        generate_mel_filters(generated, filters.n_mel, (filters.n_fft - 1) * 2, QWEN_SAMPLE_RATE);
+        if (generated.data.size() != filters.data.size()) {
+            fprintf(stderr, "FAILED: generated filterbank has %zu values, reference %zu\n",
+                    generated.data.size(), filters.data.size());
+            return 1;
+        }
+        float max_filter_diff = 0.0f;
+        for (size_t i = 0; i < filters.data.size(); ++i) {
+            max_filter_diff = std::max(max_filter_diff, std::fabs(generated.data[i] - filters.data[i]));
+        }
+        printf("  Generated filterbank vs reference: max diff %.3e\n", max_filter_diff);
+        if (max_filter_diff > 1e-6f) {
+            fprintf(stderr, "FAILED: generated mel filterbank differs from the reference filters\n");
+            return 1;
+        }
+        filters = generated;
+    }
+
     // Step 3: Compute mel spectrogram
     printf("Computing mel spectrogram...\n");
     MelSpectrogram mel_computed;

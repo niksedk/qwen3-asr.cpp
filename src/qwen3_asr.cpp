@@ -1,10 +1,12 @@
 #include "qwen3_asr.h"
+#include "language_prompt.h"
 #include "timing.h"
 
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <ggml-impl.h>
@@ -78,6 +80,27 @@ transcribe_result Qwen3ASR::transcribe(const float * samples, int n_samples,
     return transcribe_internal(samples, n_samples, params);
 }
 
+
+// Resolve a user-supplied language (canonical name, lowercase name or ISO code)
+// to its prompt entry; nullptr means "let the model detect the language".
+static const language_prompt_entry * find_language_prompt(const std::string & language) {
+    std::string key;
+    for (unsigned char c : language) {
+        if (!std::isspace(c)) key.push_back(static_cast<char>(std::tolower(c)));
+    }
+    if (key.empty()) {
+        return nullptr;
+    }
+    for (const auto & entry : LANGUAGE_PROMPT_TABLE) {
+        for (const char * alias : entry.aliases) {
+            if (key == alias) {
+                return &entry;
+            }
+        }
+    }
+    return nullptr;
+}
+
 transcribe_result Qwen3ASR::transcribe_internal(const float * samples, int n_samples,
                                                  const transcribe_params & params) {
     transcribe_result result;
@@ -115,6 +138,16 @@ transcribe_result Qwen3ASR::transcribe_internal(const float * samples, int n_sam
     const auto & text_hparams = encoder_.get_text_hparams();
     int32_t n_audio_frames = audio_features.size() / text_hparams.hidden_size;
     
+    // Debug aid (see QWEN3_ASR_DEBUG_HIDDEN in text_decoder.cpp): also dump the
+    // mel spectrogram and the encoder output of this call.
+    if (const char * dbg_dir = getenv("QWEN3_ASR_DEBUG_HIDDEN")) {
+        std::ofstream fm(std::string(dbg_dir) + "/mel.f32", std::ios::binary);
+        fm.write(reinterpret_cast<const char *>(mel.data.data()), mel.data.size() * sizeof(float));
+        std::ofstream fa(std::string(dbg_dir) + "/audio_features.f32", std::ios::binary);
+        fa.write(reinterpret_cast<const char *>(audio_features.data()), audio_features.size() * sizeof(float));
+        fprintf(stderr, "dumped mel [%d x %d] and audio features [%d x %d]\n", mel.n_mel, mel.n_len, n_audio_frames, text_hparams.hidden_size);
+    }
+    
     if (params.print_progress) {
         GGML_LOG_INFO("%s: Audio features: [%d, %d]\n", __func__, n_audio_frames, text_hparams.hidden_size);
     }
@@ -134,12 +167,31 @@ transcribe_result Qwen3ASR::transcribe_internal(const float * samples, int n_sam
     result.t_decode_ms = get_time_ms() - t_decode_start;
     
     result.tokens = output_tokens;
-    const size_t text_start = std::min<size_t>(output_tokens.size(), 2);  // remove language prefix tokens
+    size_t text_start = 0;
+    if (const language_prompt_entry * forced = find_language_prompt(params.language)) {
+        // the prompt already contained "language <Name><asr_text>": output is text only
+        result.language = forced->name;
+    } else {
+        // the model emits "language <Name><asr_text>" before the transcript; the
+        // name can be more than one token (Cantonese, Macedonian), so skip up to
+        // and including the <asr_text> token instead of a fixed count
+        const size_t limit = std::min<size_t>(output_tokens.size(), 6);
+        for (size_t i = 0; i < limit; ++i) {
+            if (output_tokens[i] == ASR_TEXT_TOKEN_ID) {
+                text_start = i + 1;
+                break;
+            }
+        }
+        if (text_start == 0) {
+            text_start = std::min<size_t>(output_tokens.size(), 2);  // legacy fallback
+        }
+        if (text_start >= 2) {
+            std::vector<int32_t> lang_tokens(output_tokens.begin() + 1, output_tokens.begin() + (text_start - 1));
+            result.language = decoder_.decode_tokens(lang_tokens);
+        }
+    }
     std::vector text_tokens(output_tokens.begin() + text_start, output_tokens.end());
     result.text = decoder_.decode_tokens(text_tokens);
-    if (output_tokens.size() >= 2) {
-        result.language = decoder_.decode_token(output_tokens[1]);
-    }
     result.success = true;
     
     result.t_total_ms = get_time_ms() - t_total_start;
@@ -207,9 +259,42 @@ std::vector<int32_t> Qwen3ASR::build_input_tokens(int32_t n_audio_frames,
     tokens.push_back(assistant_token);
     tokens.push_back(newline);
     
-    (void)language;
+    // Forcing the language works like the qwen-asr Python package: the
+    // assistant turn is pre-filled with "language <Name><asr_text>" so the
+    // model only has to produce the transcript. Without it the model picks the
+    // language itself, which is unreliable on short clips (e.g. Danish speech
+    // transcribed as Swedish).
+    if (const language_prompt_entry * forced = find_language_prompt(language)) {
+        tokens.push_back(LANGUAGE_PROMPT_TOKEN_ID);
+        tokens.insert(tokens.end(), forced->tokens.begin(), forced->tokens.end());
+        tokens.push_back(ASR_TEXT_TOKEN_ID);
+    }
     
     return tokens;
+}
+
+
+// Debug aid: QWEN3_ASR_DEBUG_TOPK=<n> prints the n highest logits of every
+// decoding step to stderr so a run can be compared with the reference model.
+static void debug_print_topk(const TextDecoder & decoder, const float * logits, int32_t vocab_size, size_t step) {
+    static const int topk = [] {
+        const char * env = getenv("QWEN3_ASR_DEBUG_TOPK");
+        return env ? atoi(env) : 0;
+    }();
+    if (topk <= 0) {
+        return;
+    }
+    std::vector<int32_t> idx(vocab_size);
+    for (int32_t i = 0; i < vocab_size; ++i) idx[i] = i;
+    const int k = std::min<int32_t>(topk, vocab_size);
+    std::partial_sort(idx.begin(), idx.begin() + k, idx.end(),
+                      [logits](int32_t a, int32_t b) { return logits[a] > logits[b]; });
+    fprintf(stderr, "step %zu:", step);
+    for (int i = 0; i < k; ++i) {
+        const std::string tok = decoder.decode_token(idx[i]);
+        fprintf(stderr, " %d'%s'=%.2f", idx[i], tok.c_str(), logits[idx[i]]);
+    }
+    fprintf(stderr, "\n");
 }
 
 bool Qwen3ASR::decode_greedy(const std::vector<int32_t> & input_tokens,
@@ -245,6 +330,15 @@ bool Qwen3ASR::decode_greedy(const std::vector<int32_t> & input_tokens,
     int32_t vocab_size = cfg.vocab_size;
     int32_t n_input = input_tokens.size();
     
+    // Debug aid: QWEN3_ASR_DEBUG_LOGITS=<file> dumps the prompt logits of every
+    // position (n_tokens x vocab_size, float32, row-major) for comparison with
+    // the reference model.
+    if (const char * dump_path = getenv("QWEN3_ASR_DEBUG_LOGITS")) {
+        std::ofstream dump(dump_path, std::ios::binary);
+        dump.write(reinterpret_cast<const char *>(logits.data()), logits.size() * sizeof(float));
+        fprintf(stderr, "dumped %zu logits (%zu rows) to %s\n", logits.size(), logits.size() / vocab_size, dump_path);
+    }
+    debug_print_topk(decoder_, logits.data(), vocab_size, 0);
     int32_t next_token = sample_greedy(logits.data(), vocab_size);
     
     output_tokens.clear();
@@ -270,6 +364,7 @@ bool Qwen3ASR::decode_greedy(const std::vector<int32_t> & input_tokens,
             }
         }
         
+        debug_print_topk(decoder_, logits.data(), vocab_size, output_tokens.size());
         next_token = sample_greedy(logits.data(), vocab_size);
         output_tokens.push_back(next_token);
         

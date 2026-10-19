@@ -45,7 +45,8 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  -m, --model <path>     Path to GGUF model (default: models/qwen3-asr-0.6b-f16.gguf)\n");
     fprintf(stderr, "  -f, --audio <path>     Path to audio file (WAV, 16kHz mono) [required]\n");
     fprintf(stderr, "  -o, --output <path>    Output file path (default: stdout)\n");
-    fprintf(stderr, "  -l, --language <code>  Language code (optional, e.g. 'korean' for Korean word splitting)\n");
+    fprintf(stderr, "  -l, --language <code>  Force the spoken language (name or ISO code, e.g. 'da', 'danish');\n");
+    fprintf(stderr, "                         also selects Korean word splitting for 'korean'\n");
     fprintf(stderr, "  -t, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  --max-tokens <n>       Maximum tokens to generate (default: 1024)\n");
     fprintf(stderr, "  --progress             Print progress during transcription\n");
