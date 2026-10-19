@@ -1,10 +1,12 @@
 #include "qwen3_asr.h"
+#include "language_prompt.h"
 #include "timing.h"
 
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <ggml-impl.h>
@@ -78,6 +80,27 @@ transcribe_result Qwen3ASR::transcribe(const float * samples, int n_samples,
     return transcribe_internal(samples, n_samples, params);
 }
 
+
+// Resolve a user-supplied language (canonical name, lowercase name or ISO code)
+// to its prompt entry; nullptr means "let the model detect the language".
+static const language_prompt_entry * find_language_prompt(const std::string & language) {
+    std::string key;
+    for (unsigned char c : language) {
+        if (!std::isspace(c)) key.push_back(static_cast<char>(std::tolower(c)));
+    }
+    if (key.empty()) {
+        return nullptr;
+    }
+    for (const auto & entry : LANGUAGE_PROMPT_TABLE) {
+        for (const char * alias : entry.aliases) {
+            if (key == alias) {
+                return &entry;
+            }
+        }
+    }
+    return nullptr;
+}
+
 transcribe_result Qwen3ASR::transcribe_internal(const float * samples, int n_samples,
                                                  const transcribe_params & params) {
     transcribe_result result;
@@ -144,12 +167,31 @@ transcribe_result Qwen3ASR::transcribe_internal(const float * samples, int n_sam
     result.t_decode_ms = get_time_ms() - t_decode_start;
     
     result.tokens = output_tokens;
-    const size_t text_start = std::min<size_t>(output_tokens.size(), 2);  // remove language prefix tokens
+    size_t text_start = 0;
+    if (const language_prompt_entry * forced = find_language_prompt(params.language)) {
+        // the prompt already contained "language <Name><asr_text>": output is text only
+        result.language = forced->name;
+    } else {
+        // the model emits "language <Name><asr_text>" before the transcript; the
+        // name can be more than one token (Cantonese, Macedonian), so skip up to
+        // and including the <asr_text> token instead of a fixed count
+        const size_t limit = std::min<size_t>(output_tokens.size(), 6);
+        for (size_t i = 0; i < limit; ++i) {
+            if (output_tokens[i] == ASR_TEXT_TOKEN_ID) {
+                text_start = i + 1;
+                break;
+            }
+        }
+        if (text_start == 0) {
+            text_start = std::min<size_t>(output_tokens.size(), 2);  // legacy fallback
+        }
+        if (text_start >= 2) {
+            std::vector<int32_t> lang_tokens(output_tokens.begin() + 1, output_tokens.begin() + (text_start - 1));
+            result.language = decoder_.decode_tokens(lang_tokens);
+        }
+    }
     std::vector text_tokens(output_tokens.begin() + text_start, output_tokens.end());
     result.text = decoder_.decode_tokens(text_tokens);
-    if (output_tokens.size() >= 2) {
-        result.language = decoder_.decode_token(output_tokens[1]);
-    }
     result.success = true;
     
     result.t_total_ms = get_time_ms() - t_total_start;
@@ -217,7 +259,16 @@ std::vector<int32_t> Qwen3ASR::build_input_tokens(int32_t n_audio_frames,
     tokens.push_back(assistant_token);
     tokens.push_back(newline);
     
-    (void)language;
+    // Forcing the language works like the qwen-asr Python package: the
+    // assistant turn is pre-filled with "language <Name><asr_text>" so the
+    // model only has to produce the transcript. Without it the model picks the
+    // language itself, which is unreliable on short clips (e.g. Danish speech
+    // transcribed as Swedish).
+    if (const language_prompt_entry * forced = find_language_prompt(language)) {
+        tokens.push_back(LANGUAGE_PROMPT_TOKEN_ID);
+        tokens.insert(tokens.end(), forced->tokens.begin(), forced->tokens.end());
+        tokens.push_back(ASR_TEXT_TOKEN_ID);
+    }
     
     return tokens;
 }
