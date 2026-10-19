@@ -28,6 +28,7 @@ struct cli_params {
     std::string language = "";
     std::string align_text = "";
     int32_t max_tokens = 1024;
+    int beam_size = 1;
     int32_t n_threads = 4;
     bool print_progress = false;
     bool print_timing = true;
@@ -49,6 +50,7 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "                         also selects Korean word splitting for 'korean'\n");
     fprintf(stderr, "  -t, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  --max-tokens <n>       Maximum tokens to generate (default: 1024)\n");
+    fprintf(stderr, "  --beam-size <n>        Beam search width, 1 = greedy (default: 1)\n");
     fprintf(stderr, "  --progress             Print progress during transcription\n");
     fprintf(stderr, "  --no-timing            Don't print timing information\n");
     fprintf(stderr, "  --tokens               Print token IDs\n");
@@ -118,6 +120,12 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
                 return false;
             }
             params.max_tokens = std::atoi(argv[++i]);
+        } else if (strcmp(arg, "--beam-size") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg);
+                return false;
+            }
+            params.beam_size = std::max(1, std::atoi(argv[++i]));
         } else if (strcmp(arg, "--progress") == 0) {
             params.print_progress = true;
         } else if (strcmp(arg, "--no-timing") == 0) {
@@ -522,6 +530,7 @@ static int run_transcription(const cli_params & params) {
     
     qwen3_asr::transcribe_params tp;
     tp.max_tokens = params.max_tokens;
+    tp.beam_size = params.beam_size;
     tp.language = params.language;
     tp.n_threads = params.n_threads;
     tp.print_progress = params.print_progress;
@@ -623,6 +632,7 @@ static int run_transcribe_and_align(const cli_params & params) {
 
         qwen3_asr::transcribe_params tp;
         tp.max_tokens = params.max_tokens;
+    tp.beam_size = params.beam_size;
         tp.language = global_lang;
         tp.n_threads = params.n_threads;
         tp.print_progress = params.print_progress;

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdio>
 #include <fstream>
+#include <utility>
 #include <algorithm>
 #include <ggml-impl.h>
 #include <ggml-cpu.h>
@@ -372,54 +373,68 @@ bool TextDecoder::load_tensor_data(const std::string & path, gguf_context * ctx)
 }
 
 bool TextDecoder::init_kv_cache(int32_t n_ctx) {
+    return alloc_kv_cache(state_.cache, n_ctx);
+}
+
+bool TextDecoder::alloc_kv_cache(kv_cache & cache, int32_t n_ctx) {
     const auto & cfg = model_.config;
-    
-    free_kv_cache(state_.cache);
-    
-    state_.cache.n_ctx = n_ctx;
-    state_.cache.n_used = 0;
-    state_.cache.head_dim = cfg.head_dim;
-    state_.cache.n_kv_heads = cfg.n_key_value_heads;
-    state_.cache.n_layers = cfg.n_decoder_layers;
+    free_kv_cache(cache);
+    cache.n_ctx = n_ctx;
+    cache.n_used = 0;
+    cache.head_dim = cfg.head_dim;
+    cache.n_kv_heads = cfg.n_key_value_heads;
+    cache.n_layers = cfg.n_decoder_layers;
     
     const size_t n_tensors = cfg.n_decoder_layers * 2;
     const size_t ctx_size = n_tensors * ggml_tensor_overhead();
-    
     ggml_init_params params = {
         /*.mem_size   =*/ ctx_size,
         /*.mem_buffer =*/ nullptr,
         /*.no_alloc   =*/ true,
     };
-    
-    state_.cache.ctx = ggml_init(params);
-    if (!state_.cache.ctx) {
+    cache.ctx = ggml_init(params);
+    if (!cache.ctx) {
         error_msg_ = "Failed to create KV cache context";
         return false;
     }
-    
-    state_.cache.k_cache.resize(cfg.n_decoder_layers);
-    state_.cache.v_cache.resize(cfg.n_decoder_layers);
-    
+    cache.k_cache.resize(cfg.n_decoder_layers);
+    cache.v_cache.resize(cfg.n_decoder_layers);
     for (int il = 0; il < cfg.n_decoder_layers; ++il) {
-        state_.cache.k_cache[il] = ggml_new_tensor_3d(
-            state_.cache.ctx, GGML_TYPE_F16,
-            cfg.head_dim, cfg.n_key_value_heads, n_ctx);
-        ggml_format_name(state_.cache.k_cache[il], "k_cache_%d", il);
-        
-        state_.cache.v_cache[il] = ggml_new_tensor_3d(
-            state_.cache.ctx, GGML_TYPE_F16,
-            cfg.head_dim, cfg.n_key_value_heads, n_ctx);
-        ggml_format_name(state_.cache.v_cache[il], "v_cache_%d", il);
+        cache.k_cache[il] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F16, cfg.head_dim, cfg.n_key_value_heads, n_ctx);
+        ggml_format_name(cache.k_cache[il], "k_cache_%d", il);
+        cache.v_cache[il] = ggml_new_tensor_3d(cache.ctx, GGML_TYPE_F16, cfg.head_dim, cfg.n_key_value_heads, n_ctx);
+        ggml_format_name(cache.v_cache[il], "v_cache_%d", il);
     }
-    
     ggml_backend_t kv_backend = state_.backend_gpu ? state_.backend_gpu : state_.backend_cpu;
-    state_.cache.buffer = ggml_backend_alloc_ctx_tensors(state_.cache.ctx, kv_backend);
-    if (!state_.cache.buffer) {
+    cache.buffer = ggml_backend_alloc_ctx_tensors(cache.ctx, kv_backend);
+    if (!cache.buffer) {
         error_msg_ = "Failed to allocate KV cache buffer";
         return false;
     }
-    
     return true;
+}
+
+bool TextDecoder::copy_kv_cache(const kv_cache & src, kv_cache & dst) {
+    if (dst.n_ctx != src.n_ctx || dst.k_cache.size() != src.k_cache.size()) {
+        error_msg_ = "KV cache geometry mismatch";
+        return false;
+    }
+    for (size_t il = 0; il < src.k_cache.size(); ++il) {
+        ggml_backend_tensor_copy(src.k_cache[il], dst.k_cache[il]);
+        ggml_backend_tensor_copy(src.v_cache[il], dst.v_cache[il]);
+    }
+    dst.n_used = src.n_used;
+    return true;
+}
+
+bool TextDecoder::forward_with_cache(kv_cache & cache, const int32_t * tokens, int32_t n_tokens,
+                                     int32_t n_past, std::vector<float> & output) {
+    // build_graph reads state_.cache, so run against the given cache by swapping
+    // the (pointer-only) structs around the call
+    std::swap(state_.cache, cache);
+    const bool ok = forward(tokens, n_tokens, n_past, output);
+    std::swap(state_.cache, cache);
+    return ok;
 }
 
 void TextDecoder::clear_kv_cache() {

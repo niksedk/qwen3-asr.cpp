@@ -160,7 +160,10 @@ transcribe_result Qwen3ASR::transcribe_internal(const float * samples, int n_sam
     
     int64_t t_decode_start = get_time_ms();
     std::vector<int32_t> output_tokens;
-    if (!decode_greedy(input_tokens, audio_features, n_audio_frames, params, output_tokens)) {
+    const bool decoded = params.beam_size > 1
+        ? decode_beam(input_tokens, audio_features, n_audio_frames, params, output_tokens)
+        : decode_greedy(input_tokens, audio_features, n_audio_frames, params, output_tokens);
+    if (!decoded) {
         result.error_msg = "Decoding failed: " + error_msg_;
         return result;
     }
@@ -295,6 +298,218 @@ static void debug_print_topk(const TextDecoder & decoder, const float * logits, 
         fprintf(stderr, " %d'%s'=%.2f", idx[i], tok.c_str(), logits[idx[i]]);
     }
     fprintf(stderr, "\n");
+}
+
+
+// Beam search over the text decoder. Every beam owns a KV cache; a beam that keeps a
+// single child continues in its own cache, extra children copy the parent's cache
+// (device side). Scores are summed token log-probabilities, finished hypotheses are
+// compared by their per-token average so long and short outputs compete fairly.
+namespace {
+
+struct beam_hyp {
+    std::vector<int32_t> tokens;
+    double score = 0.0;   // sum of log-probabilities
+    int32_t cache = -1;   // index into the cache pool
+};
+
+struct beam_candidate {
+    int32_t parent;
+    int32_t token;
+    double score;
+};
+
+// top-k (token, logp) of a logit row; logp = logit - logsumexp
+void topk_logprobs(const float * logits, int32_t vocab_size, int32_t k,
+                   std::vector<std::pair<int32_t, double>> & out) {
+    double max_logit = -INFINITY;
+    for (int32_t i = 0; i < vocab_size; ++i) {
+        max_logit = std::max(max_logit, (double)logits[i]);
+    }
+    double sum = 0.0;
+    for (int32_t i = 0; i < vocab_size; ++i) {
+        sum += exp((double)logits[i] - max_logit);
+    }
+    const double lse = max_logit + log(sum);
+    std::vector<int32_t> idx(vocab_size);
+    for (int32_t i = 0; i < vocab_size; ++i) idx[i] = i;
+    k = std::min(k, vocab_size);
+    std::partial_sort(idx.begin(), idx.begin() + k, idx.end(),
+                      [logits](int32_t a, int32_t b) { return logits[a] > logits[b]; });
+    out.clear();
+    for (int32_t i = 0; i < k; ++i) {
+        out.emplace_back(idx[i], (double)logits[idx[i]] - lse);
+    }
+}
+
+} // namespace
+
+bool Qwen3ASR::decode_beam(const std::vector<int32_t> & input_tokens,
+                           const std::vector<float> & audio_features,
+                           int32_t n_audio_frames,
+                           const transcribe_params & params,
+                           std::vector<int32_t> & output_tokens) {
+    const auto & cfg = decoder_.get_config();
+    const int32_t B = std::max(1, params.beam_size);
+    const int32_t vocab_size = cfg.vocab_size;
+    const int32_t n_input = input_tokens.size();
+    const int32_t n_ctx_needed = n_input + params.max_tokens;
+    
+    auto is_end = [&](int32_t tok) { return tok == cfg.eos_token_id || tok == cfg.pad_token_id; };
+    
+    if (!decoder_.init_kv_cache(n_ctx_needed)) {
+        error_msg_ = "Failed to initialize KV cache: " + decoder_.get_error();
+        return false;
+    }
+    
+    // prompt pass on the main cache
+    std::vector<float> logits;
+    {
+        QWEN3_TIMER("decode.initial_forward");
+        if (!decoder_.forward_with_audio(input_tokens.data(), n_input,
+                                         audio_features.data(), n_audio_frames,
+                                         /*audio_start_pos=*/9, 0, logits)) {
+            error_msg_ = "Initial forward pass failed: " + decoder_.get_error();
+            return false;
+        }
+    }
+    
+    // one cache per beam, all starting as copies of the prompt cache
+    std::vector<kv_cache> pool(B);
+    auto cleanup = [&]() { for (auto & c : pool) free_kv_cache(c); };
+    for (int32_t i = 0; i < B; ++i) {
+        if (!decoder_.alloc_kv_cache(pool[i], n_ctx_needed) ||
+            !decoder_.copy_kv_cache(decoder_.get_kv_cache(), pool[i])) {
+            error_msg_ = "Beam search: " + decoder_.get_error();
+            cleanup();
+            return false;
+        }
+    }
+    
+    std::vector<std::pair<int32_t, double>> topk;
+    topk_logprobs(logits.data(), vocab_size, B, topk);
+    
+    std::vector<beam_hyp> beams;
+    std::vector<std::pair<std::vector<int32_t>, double>> finished;  // tokens (no EOS), normalised score
+    for (int32_t i = 0; i < (int32_t)topk.size(); ++i) {
+        if (is_end(topk[i].first)) {
+            finished.emplace_back(std::vector<int32_t>{}, topk[i].second);
+            continue;
+        }
+        beam_hyp h;
+        h.tokens.push_back(topk[i].first);
+        h.score = topk[i].second;
+        h.cache = i;
+        beams.push_back(std::move(h));
+    }
+    
+    std::vector<beam_candidate> candidates;
+    while (!beams.empty() && (int32_t)finished.size() < B) {
+        // every live beam feeds its last token through its own cache
+        candidates.clear();
+        bool max_reached = false;
+        for (int32_t bi = 0; bi < (int32_t)beams.size(); ++bi) {
+            beam_hyp & h = beams[bi];
+            if ((int32_t)h.tokens.size() >= params.max_tokens) {
+                max_reached = true;
+                break;
+            }
+            const int32_t n_past = n_input + (int32_t)h.tokens.size() - 1;
+            if (!decoder_.forward_with_cache(pool[h.cache], &h.tokens.back(), 1, n_past, logits)) {
+                error_msg_ = "Beam search forward failed: " + decoder_.get_error();
+                cleanup();
+                return false;
+            }
+            topk_logprobs(logits.data(), vocab_size, B, topk);
+            for (const auto & [tok, lp] : topk) {
+                candidates.push_back({bi, tok, h.score + lp});
+            }
+        }
+        if (max_reached) {
+            break;
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const beam_candidate & a, const beam_candidate & b) { return a.score > b.score; });
+        
+        // finished hypotheses leave the beam, the best B live ones continue
+        std::vector<beam_candidate> next;
+        for (const auto & c : candidates) {
+            if ((int32_t)next.size() >= B) {
+                break;
+            }
+            if (is_end(c.token)) {
+                const auto & parent = beams[c.parent];
+                finished.emplace_back(parent.tokens, c.score / (double)(parent.tokens.size() + 1));
+                continue;
+            }
+            next.push_back(c);
+        }
+        
+        // cache assignment: first child of a parent inherits its cache, further
+        // children copy it; caches of parents without children are recycled
+        std::vector<int32_t> children_seen(beams.size(), 0);
+        std::vector<int32_t> free_caches;
+        {
+            std::vector<bool> used(B, false);
+            for (const auto & c : next) {
+                if (!children_seen[c.parent]++) {
+                    used[beams[c.parent].cache] = true;
+                }
+            }
+            for (int32_t i = 0; i < B; ++i) {
+                if (!used[i]) free_caches.push_back(i);
+            }
+        }
+        std::fill(children_seen.begin(), children_seen.end(), 0);
+        std::vector<beam_hyp> new_beams;
+        new_beams.reserve(next.size());
+        for (const auto & c : next) {
+            const beam_hyp & parent = beams[c.parent];
+            beam_hyp h;
+            h.tokens = parent.tokens;
+            h.tokens.push_back(c.token);
+            h.score = c.score;
+            if (children_seen[c.parent]++ == 0) {
+                h.cache = parent.cache;
+            } else {
+                h.cache = free_caches.back();
+                free_caches.pop_back();
+                if (!decoder_.copy_kv_cache(pool[parent.cache], pool[h.cache])) {
+                    error_msg_ = "Beam search cache copy failed: " + decoder_.get_error();
+                    cleanup();
+                    return false;
+                }
+            }
+            new_beams.push_back(std::move(h));
+        }
+        beams.swap(new_beams);
+        
+        if (progress_callback_ && !beams.empty()) {
+            progress_callback_(beams.front().tokens.size(), params.max_tokens);
+        }
+    }
+    
+    // best finished hypothesis by per-token score, else best live beam
+    const std::vector<int32_t> * best = nullptr;
+    double best_score = -INFINITY;
+    for (const auto & f : finished) {
+        if (f.second > best_score) {
+            best_score = f.second;
+            best = &f.first;
+        }
+    }
+    if (!best) {
+        for (const auto & h : beams) {
+            const double norm = h.score / (double)std::max<size_t>(1, h.tokens.size());
+            if (norm > best_score) {
+                best_score = norm;
+                best = &h.tokens;
+            }
+        }
+    }
+    output_tokens = best ? *best : std::vector<int32_t>{};
+    cleanup();
+    return true;
 }
 
 bool Qwen3ASR::decode_greedy(const std::vector<int32_t> & input_tokens,
