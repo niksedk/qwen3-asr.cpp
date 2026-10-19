@@ -350,66 +350,65 @@ bool load_mel_filters_npy(const std::string& path, MelFilters& filters) {
 // Mel Filterbank Generation
 // ============================================================================
 
-static float hz_to_mel(float hz) {
-    return 2595.0f * log10f(1.0f + hz / 700.0f);
+// Slaney mel scale (linear below 1 kHz, logarithmic above), as used by
+// librosa.filters.mel(htk=False) and therefore by Whisper / Qwen3-ASR's
+// WhisperFeatureExtractor. The HTK formula (2595 * log10(1 + f / 700)) that
+// was used before places every band differently and produced a log-mel
+// spectrogram that was off by up to 1.6 (mean 0.18) versus the reference,
+// which in turn shifted the audio embeddings and the decoded text.
+static double slaney_hz_to_mel(double hz) {
+    const double f_sp = 200.0 / 3.0;
+    const double min_log_hz = 1000.0;
+    const double min_log_mel = min_log_hz / f_sp;
+    const double logstep = log(6.4) / 27.0;
+    if (hz >= min_log_hz) {
+        return min_log_mel + log(hz / min_log_hz) / logstep;
+    }
+    return hz / f_sp;
 }
 
-static float mel_to_hz(float mel) {
-    return 700.0f * (powf(10.0f, mel / 2595.0f) - 1.0f);
+static double slaney_mel_to_hz(double mel) {
+    const double f_sp = 200.0 / 3.0;
+    const double min_log_hz = 1000.0;
+    const double min_log_mel = min_log_hz / f_sp;
+    const double logstep = log(6.4) / 27.0;
+    if (mel >= min_log_mel) {
+        return min_log_hz * exp(logstep * (mel - min_log_mel));
+    }
+    return f_sp * mel;
 }
 
+// Port of librosa.filters.mel(sr, n_fft, n_mels, fmin=0, fmax=sr/2, htk=False,
+// norm="slaney"): triangular filters evaluated at the FFT bin centre
+// frequencies, with Slaney area normalisation.
 void generate_mel_filters(MelFilters& filters, int n_mels, int n_fft, int sample_rate) {
-    int n_fft_bins = 1 + n_fft / 2;  // 201
-    float fmax = sample_rate / 2.0f;  // Nyquist frequency
-    float fmin = 0.0f;
+    const int n_fft_bins = 1 + n_fft / 2;  // 201
+    const double fmin = 0.0;
+    const double fmax = sample_rate / 2.0;
 
     filters.n_mel = n_mels;
     filters.n_fft = n_fft_bins;
-    filters.data.resize(n_mels * n_fft_bins, 0.0f);
+    filters.data.assign((size_t)n_mels * n_fft_bins, 0.0f);
 
-    float mel_min = hz_to_mel(fmin);
-    float mel_max = hz_to_mel(fmax);
-
-    // Create n_mels + 2 equally spaced points in mel scale
-    std::vector<float> mel_points(n_mels + 2);
+    // n_mels + 2 points equally spaced on the mel scale, converted back to Hz
+    std::vector<double> mel_f(n_mels + 2);
+    const double mel_min = slaney_hz_to_mel(fmin);
+    const double mel_max = slaney_hz_to_mel(fmax);
     for (int i = 0; i < n_mels + 2; i++) {
-        mel_points[i] = mel_min + (mel_max - mel_min) * i / (n_mels + 1);
+        mel_f[i] = slaney_mel_to_hz(mel_min + (mel_max - mel_min) * i / (n_mels + 1));
     }
 
-    // Convert back to Hz
-    std::vector<float> hz_points(n_mels + 2);
-    for (int i = 0; i < n_mels + 2; i++) {
-        hz_points[i] = mel_to_hz(mel_points[i]);
-    }
-
-    // Convert to FFT bin indices
-    std::vector<float> bin_points(n_mels + 2);
-    for (int i = 0; i < n_mels + 2; i++) {
-        bin_points[i] = (n_fft + 1) * hz_points[i] / sample_rate;
-    }
-
-    // Create triangular filters
     for (int m = 0; m < n_mels; m++) {
-        float left = bin_points[m];
-        float center = bin_points[m + 1];
-        float right = bin_points[m + 2];
-
+        const double f_left = mel_f[m];
+        const double f_center = mel_f[m + 1];
+        const double f_right = mel_f[m + 2];
+        const double enorm = 2.0 / (f_right - f_left);
         for (int k = 0; k < n_fft_bins; k++) {
-            float weight = 0.0f;
-            if (k >= left && k <= center) {
-                weight = (k - left) / (center - left);
-            } else if (k >= center && k <= right) {
-                weight = (right - k) / (right - center);
-            }
-            filters.data[m * n_fft_bins + k] = weight;
-        }
-    }
-
-    // Normalize filters (slaney normalization)
-    for (int m = 0; m < n_mels; m++) {
-        float enorm = 2.0f / (hz_points[m + 2] - hz_points[m]);
-        for (int k = 0; k < n_fft_bins; k++) {
-            filters.data[m * n_fft_bins + k] *= enorm;
+            const double freq = (double)k * sample_rate / n_fft;  // FFT bin centre
+            const double lower = (freq - f_left) / (f_center - f_left);
+            const double upper = (f_right - freq) / (f_right - f_center);
+            const double w = std::max(0.0, std::min(lower, upper));
+            filters.data[(size_t)m * n_fft_bins + k] = (float)(w * enorm);
         }
     }
 }
