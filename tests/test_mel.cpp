@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include "mel_spectrogram.h"
 
 #include <cstdio>
