@@ -17,6 +17,10 @@ struct transcribe_params {
     // Maximum number of tokens to generate
     int32_t max_tokens = 1024;
     
+    // Beam search width; 1 = greedy (default). Each beam costs one decoder pass per
+    // token and one extra KV cache, so decoding is roughly beam_size times slower.
+    int32_t beam_size = 1;
+    
     // Language code (optional, for prompting)
     std::string language = "";
     
@@ -92,6 +96,12 @@ private:
                                              const std::string & language);
     
     // Greedy decoding loop
+    bool decode_beam(const std::vector<int32_t> & input_tokens,
+                     const std::vector<float> & audio_features,
+                     int32_t n_audio_frames,
+                     const transcribe_params & params,
+                     std::vector<int32_t> & output_tokens);
+    
     bool decode_greedy(const std::vector<int32_t> & input_tokens,
                        const std::vector<float> & audio_features,
                        int32_t n_audio_frames,

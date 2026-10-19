@@ -482,6 +482,7 @@ int main(int argc, char ** argv) {
         params.print_timing = false;
         params.print_progress = false;
         params.language = form_value(req, "language", "");
+        params.beam_size = std::max(1, std::atoi(form_value(req, "beam_size", "1").c_str()));
 
         double audio_duration_sec = 0.0;
         if (response_format == "verbose_json") {

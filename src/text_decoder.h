@@ -119,6 +119,15 @@ public:
     // Clear KV cache (for new sequence)
     void clear_kv_cache();
     
+    // Extra KV caches for beam search: allocate one with the same geometry as the
+    // main cache, copy the used prefix of one cache into another (device side),
+    // and run a forward pass against a given cache instead of the main one.
+    bool alloc_kv_cache(kv_cache & cache, int32_t n_ctx);
+    bool copy_kv_cache(const kv_cache & src, kv_cache & dst);
+    bool forward_with_cache(kv_cache & cache, const int32_t * tokens, int32_t n_tokens,
+                            int32_t n_past, std::vector<float> & output);
+    [[nodiscard]] const kv_cache & get_kv_cache() const { return state_.cache; }
+    
     // Forward pass: compute logits for input tokens
     // tokens: input token IDs [n_tokens]
     // n_past: number of tokens already in KV cache
