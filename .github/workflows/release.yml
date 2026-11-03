@@ -20,35 +20,46 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
+                # cpu_flags: never let the build target the runner's own CPU (GGML_NATIVE). v0.1.10
+                # did, and its Linux packages crashed with SIGILL on CPUs without the runner's
+                # AVX-512 (x64) or SVE (arm64). Where ggml supports it, every CPU variant is built
+                # as a loadable module and the best one for the user's CPU is picked at run time.
                 include:
                     -   name: win64
                         runner: windows-latest
                         archive: qwen3-asr-cpp-win64.zip
                         vulkan: 'OFF'
+                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON'
                     -   name: win64-vulkan
                         runner: windows-latest
                         archive: qwen3-asr-cpp-win64-vulkan.zip
                         vulkan: 'ON'
+                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON'
                     -   name: linux
                         runner: ubuntu-22.04
                         archive: qwen3-asr-cpp-linux.zip
                         vulkan: 'OFF'
+                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON'
                     -   name: linux-vulkan
                         runner: ubuntu-22.04
                         archive: qwen3-asr-cpp-linux-vulkan.zip
                         vulkan: 'ON'
+                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON'
                     -   name: linux-arm64
                         runner: ubuntu-22.04-arm
                         archive: qwen3-asr-cpp-linux-arm64.zip
                         vulkan: 'OFF'
+                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON'
                     -   name: mac
                         runner: macos-14
                         archive: qwen3-asr-cpp-mac.zip
                         vulkan: 'OFF'
+                        cpu_flags: ''
                     -   name: mac-x64
                         runner: macos-15-intel
                         archive: qwen3-asr-cpp-mac-x64.zip
                         vulkan: 'OFF'
+                        cpu_flags: '-DGGML_NATIVE=OFF'
         runs-on: ${{ matrix.runner }}
         steps:
             -   uses: actions/checkout@v6
@@ -117,7 +128,7 @@ jobs:
             -   name: Build (Release)
                 shell: bash
                 run: |
-                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.vulkan }} -DCMAKE_PREFIX_PATH="$SPIRV_HEADERS_PREFIX"
+                    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=${{ matrix.vulkan }} ${{ matrix.cpu_flags }} -DCMAKE_PREFIX_PATH="$SPIRV_HEADERS_PREFIX"
                     cmake --build build --config Release -j 4
                     python tests/flatten_bin_files.py build bin
 
@@ -168,6 +179,24 @@ jobs:
                     cd ..
 
                     cd pkg && zip -r "../${{ matrix.archive }}" . >/dev/null
+
+            # Everything outside the per-CPU ggml-cpu-<variant> modules must run on any CPU of
+            # the architecture: no AVX-512 (zmm registers) on x64, no SVE on arm64.
+            -   name: Check CPU baseline (Linux)
+                if: runner.os == 'Linux'
+                shell: bash
+                run: |
+                    cd pkg
+                    ls libggml-cpu-*.so >/dev/null || { echo "no CPU backend variants packaged"; exit 1; }
+                    if [ "$(uname -m)" = "x86_64" ]; then pattern='%zmm'; else pattern='\b(ptrue|whilelo)\b'; fi
+                    fail=0
+                    for f in qwen3-asr-cli lib*.so*; do
+                        case "$f" in libggml-cpu-*) continue ;; esac
+                        n=$(objdump -d "$f" | grep -cE "$pattern" || true)
+                        echo "$f: $n"
+                        [ "$n" -eq 0 ] || fail=1
+                    done
+                    exit $fail
 
             -   name: Upload build artifact
                 uses: actions/upload-artifact@v4

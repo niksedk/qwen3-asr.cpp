@@ -1,4 +1,5 @@
 #include "gguf_loader.h"
+#include "backend_util.h"
 
 #include <cstdio>
 #include <cstring>
@@ -273,6 +274,7 @@ bool GGUFLoader::load_tensor_data(const std::string & path, gguf_context * ctx,
     //  * Unified-memory GPU (Apple Silicon / Metal): host and device share memory, so we can
     //    wrap the mmap'd weights with zero copy.
     //  * CPU only: wrap the mmap'd weights directly.
+    load_backends();
     ggml_backend_dev_t gpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
     bool gpu_is_unified = false;
     if (gpu_dev) {
@@ -309,7 +311,7 @@ bool GGUFLoader::load_tensor_data(const std::string & path, gguf_context * ctx,
             model.buffer = ggml_backend_dev_buffer_from_host_ptr(gpu_dev, data_base, total_size, max_tensor_size);
         }
         if (!model.buffer) {
-            model.buffer = ggml_backend_cpu_buffer_from_ptr(data_base, total_size);
+            model.buffer = cpu_buffer_from_ptr(data_base, total_size, max_tensor_size);
         }
         if (!model.buffer) {
             error_msg_ = "Failed to create buffer from mmap";

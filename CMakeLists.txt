@@ -32,7 +32,12 @@ option(GGML_VULKAN "ggml: enable Vulkan backend" OFF)
 # Compiler flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+    # Release packages build with GGML_NATIVE=OFF; -march=native there would tie this library to
+    # the CI runner's CPU (v0.1.10's Linux build used AVX-512 and crashed elsewhere with SIGILL).
+    if(NOT DEFINED GGML_NATIVE OR GGML_NATIVE)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+    endif()
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 elseif(MSVC)
     add_compile_options(
