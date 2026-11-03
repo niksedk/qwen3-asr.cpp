@@ -49,7 +49,9 @@ jobs:
                         runner: ubuntu-22.04-arm
                         archive: qwen3-asr-cpp-linux-arm64.zip
                         vulkan: 'OFF'
-                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON'
+                        # GCC 11 cannot target the armv9.2/SME variants; clang can, and still links
+                        # the system libstdc++, so the package keeps running on glibc 2.35 distros.
+                        cpu_flags: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++'
                     -   name: mac
                         runner: macos-14
                         archive: qwen3-asr-cpp-mac.zip
@@ -124,6 +126,10 @@ jobs:
                     cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/SPIRV-Headers/build" -DCMAKE_INSTALL_PREFIX=/usr/local
                     sudo cmake --build "$RUNNER_TEMP/SPIRV-Headers/build" --target install
                     echo "SPIRV_HEADERS_PREFIX=/usr/local" >> "$GITHUB_ENV"
+
+            -   name: Install clang (Linux arm64)
+                if: matrix.name == 'linux-arm64'
+                run: sudo apt-get update && sudo apt-get install -y clang && clang --version
 
             -   name: Build (Release)
                 shell: bash
