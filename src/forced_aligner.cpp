@@ -10,7 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <ggml-impl.h>
-#include <ggml-cpu.h>
+#include "backend_util.h"
 
 #define QWEN3_FA_MAX_NODES 16384
 
@@ -55,7 +55,7 @@ ForcedAligner::~ForcedAligner() {
 void ForcedAligner::set_n_threads(int n_threads) {
     n_threads_ = std::max(1, n_threads);
     if (state_.backend_cpu) {
-        ggml_backend_cpu_set_n_threads(state_.backend_cpu, n_threads_);
+        set_backend_n_threads(state_.backend_cpu, n_threads_);
     }
 }
 
@@ -100,6 +100,8 @@ bool ForcedAligner::load_model(const std::string & model_path) {
     
     gguf_free(ctx);
     if (meta_ctx) ggml_free(meta_ctx);
+    
+    load_backends();
     
     state_.backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     if (!state_.backend_cpu) {
@@ -453,6 +455,7 @@ bool ForcedAligner::load_tensor_data(const std::string & path, gguf_context * ct
     //  * Unified-memory GPU (Apple Silicon / Metal): host and device share memory, so we can
     //    wrap the mmap'd weights with zero copy.
     //  * CPU only: wrap the mmap'd weights directly.
+    load_backends();
     ggml_backend_dev_t gpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
     bool gpu_is_unified = false;
     if (gpu_dev) {
@@ -489,7 +492,7 @@ bool ForcedAligner::load_tensor_data(const std::string & path, gguf_context * ct
             model_.buffer = ggml_backend_dev_buffer_from_host_ptr(gpu_dev, data_base, total_size, max_tensor_size);
         }
         if (!model_.buffer) {
-            model_.buffer = ggml_backend_cpu_buffer_from_ptr(data_base, total_size);
+            model_.buffer = cpu_buffer_from_ptr(data_base, total_size, max_tensor_size);
         }
         if (!model_.buffer) {
             error_msg_ = "Failed to create buffer from mmap";

@@ -5,7 +5,7 @@
 #include <cstring>
 #include <algorithm>
 #include <ggml-impl.h>
-#include <ggml-cpu.h>
+#include "backend_util.h"
 
 #define QWEN3_ASR_MAX_NODES 4096
 
@@ -44,7 +44,7 @@ AudioEncoder::~AudioEncoder() {
 void AudioEncoder::set_n_threads(int n_threads) {
     n_threads_ = std::max(1, n_threads);
     if (state_.backend_cpu) {
-        ggml_backend_cpu_set_n_threads(state_.backend_cpu, n_threads_);
+        set_backend_n_threads(state_.backend_cpu, n_threads_);
     }
 }
 
@@ -54,6 +54,8 @@ bool AudioEncoder::load_model(const std::string & model_path) {
         error_msg_ = loader.get_error();
         return false;
     }
+    
+    load_backends();
     
     state_.backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     if (!state_.backend_cpu) {
