@@ -417,69 +417,6 @@ void generate_mel_filters(MelFilters& filters, int n_mels, int n_fft, int sample
 // Log Mel Spectrogram Computation
 // ============================================================================
 
-static void log_mel_spectrogram_worker(int ith, const float* hann, 
-                                        const std::vector<float>& samples,
-                                        int n_samples, int frame_size, int frame_step,
-                                        int n_threads, const MelFilters& filters,
-                                        MelSpectrogram& mel) {
-    std::vector<float> fft_in(frame_size * 2, 0.0f);
-    std::vector<float> fft_out(frame_size * 2 * 2 * 2);
-
-    int n_fft = filters.n_fft;
-    int i = ith;
-
-    // Calculate FFT only when fft_in are not all zero
-    for (; i < std::min(n_samples / frame_step + 1, mel.n_len); i += n_threads) {
-        const int offset = i * frame_step;
-
-        // Apply Hann window
-        for (int j = 0; j < std::min(frame_size, n_samples - offset); j++) {
-            fft_in[j] = hann[j] * samples[offset + j];
-        }
-
-        // Fill the rest with zeros
-        if (n_samples - offset < frame_size) {
-            std::fill(fft_in.begin() + (n_samples - offset), fft_in.end(), 0.0f);
-        }
-
-        // FFT
-        fft(fft_in.data(), frame_size, fft_out.data());
-
-        // Calculate modulus^2 of complex numbers
-        for (int j = 0; j < n_fft; j++) {
-            fft_out[j] = fft_out[2 * j + 0] * fft_out[2 * j + 0] + 
-                         fft_out[2 * j + 1] * fft_out[2 * j + 1];
-        }
-
-        // Mel spectrogram
-        for (int j = 0; j < mel.n_mel; j++) {
-            double sum = 0.0;
-            // Unrolled loop for performance
-            int k = 0;
-            for (k = 0; k < n_fft - 3; k += 4) {
-                sum += fft_out[k + 0] * filters.data[j * n_fft + k + 0] +
-                       fft_out[k + 1] * filters.data[j * n_fft + k + 1] +
-                       fft_out[k + 2] * filters.data[j * n_fft + k + 2] +
-                       fft_out[k + 3] * filters.data[j * n_fft + k + 3];
-            }
-            // Handle remainder
-            for (; k < n_fft; k++) {
-                sum += fft_out[k] * filters.data[j * n_fft + k];
-            }
-            sum = log10(std::max(sum, 1e-10));
-            mel.data[j * mel.n_len + i] = static_cast<float>(sum);
-        }
-    }
-
-    // Fill remaining frames with log10(1e-10)
-    double sum = log10(1e-10);
-    for (; i < mel.n_len; i += n_threads) {
-        for (int j = 0; j < mel.n_mel; j++) {
-            mel.data[j * mel.n_len + i] = static_cast<float>(sum);
-        }
-    }
-}
-
 bool log_mel_spectrogram(const float* samples, int n_samples,
                          const MelFilters& filters, MelSpectrogram& mel,
                          int n_threads) {
@@ -566,36 +503,52 @@ bool log_mel_spectrogram(const float* samples, int n_samples,
     }
 
 #else
+    // Radix-2 FFT (the odd size 25 at the bottom of the recursion is a table DFT), with the
+    // frames split across threads. This used to be a direct DFT calling cos() and sin() for every
+    // term, about 160k calls per 10 ms frame - minutes per hour of audio on Windows and Linux.
     const double* hann = global_cache.hann_window;
 
     std::vector<double> temp_data(mel.n_mel * compute_frames);
 
-    for (int i = 0; i < compute_frames; i++) {
-        const int offset = i * frame_step;
-
-        std::vector<double> fft_in_d(frame_size, 0.0);
-        for (int j = 0; j < frame_size; j++) {
-            fft_in_d[j] = hann[j] * static_cast<double>(samples_padded[offset + j]);
-        }
-
+    auto worker = [&](int ith, int nth) {
+        // fft() uses the space after the input and output as scratch for the recursion
+        std::vector<float> fft_in(2 * frame_size, 0.0f);
+        std::vector<float> fft_out(8 * frame_size);
         std::vector<double> power(n_fft);
-        for (int k = 0; k < n_fft; k++) {
-            double re = 0.0, im = 0.0;
-            for (int n = 0; n < frame_size; n++) {
-                double angle = 2.0 * M_PI * k * n / frame_size;
-                re += fft_in_d[n] * cos(angle);
-                im -= fft_in_d[n] * sin(angle);
-            }
-            power[k] = re * re + im * im;
-        }
 
-        for (int j = 0; j < mel.n_mel; j++) {
-            double sum = 0.0;
-            for (int k = 0; k < n_fft; k++) {
-                sum += power[k] * static_cast<double>(filters.data[j * n_fft + k]);
+        for (int i = ith; i < compute_frames; i += nth) {
+            const int offset = i * frame_step;
+
+            for (int j = 0; j < frame_size; j++) {
+                fft_in[j] = static_cast<float>(hann[j] * static_cast<double>(samples_padded[offset + j]));
             }
-            temp_data[j * compute_frames + i] = log10(std::max(sum, 1e-10));
+
+            fft(fft_in.data(), frame_size, fft_out.data());
+
+            for (int k = 0; k < n_fft; k++) {
+                const double re = fft_out[2 * k + 0];
+                const double im = fft_out[2 * k + 1];
+                power[k] = re * re + im * im;
+            }
+
+            for (int j = 0; j < mel.n_mel; j++) {
+                double sum = 0.0;
+                for (int k = 0; k < n_fft; k++) {
+                    sum += power[k] * static_cast<double>(filters.data[j * n_fft + k]);
+                }
+                temp_data[j * compute_frames + i] = log10(std::max(sum, 1e-10));
+            }
         }
+    };
+
+    const int nth = std::max(1, std::min(n_threads, compute_frames));
+    std::vector<std::thread> threads;
+    for (int t = 1; t < nth; t++) {
+        threads.emplace_back(worker, t, nth);
+    }
+    worker(0, nth);
+    for (auto& th : threads) {
+        th.join();
     }
 #endif
 
